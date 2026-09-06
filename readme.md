@@ -29,8 +29,13 @@ torch — the first `embed.py` run downloads bge-small-en-v1.5 once and caches i
 
 ## Env
 
+The default pipeline makes **no API calls**: ocrmac → BGE-small-en-v1.5 @384d
+→ Actian. Gemini is opt-in (`extract.py --llm`, `sessionize.py --llm`) and only
+writes summaries, slugs and narratives — it is never in the embedding or
+retrieval path.
+
 ```bash
-export GEMINI_API_KEY=...          # extract, session summaries, query parsing
+export GEMINI_API_KEY=...          # OPTIONAL, only for --llm
                                    # NOT used for embeddings - those are local
 export VECTOR_BACKEND=sqlite       # sqlite (default) | actian
 # optional

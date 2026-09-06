@@ -69,8 +69,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-capture", action="store_true",
                     help="don't start the capture daemon (launchd or another shell has it)")
-    ap.add_argument("--no-llm", action="store_true",
-                    help="OCR only; no Gemini calls anywhere")
+    ap.add_argument("--no-llm", action="store_true", default=True,
+                    help="(default) OCR only; no API calls anywhere")
+    ap.add_argument("--llm", dest="no_llm", action="store_false",
+                    help="opt in to Gemini extraction + summaries")
     ap.add_argument("--index-every", type=float, default=5)
     ap.add_argument("--extract-every", type=float, default=5)
     ap.add_argument("--roll", type=float, default=120,
@@ -78,7 +80,7 @@ def main():
     args = ap.parse_args()
 
     if not args.no_llm and not os.environ.get("GEMINI_API_KEY"):
-        sys.exit("GEMINI_API_KEY is not set (or pass --no-llm)")
+        sys.exit("--llm needs GEMINI_API_KEY; drop --llm to run fully local")
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)

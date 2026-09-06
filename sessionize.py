@@ -213,7 +213,7 @@ def fallback_summary(slug, frames, ents):
 
 
 def summarise(slug, frames, ents, no_llm=False):
-    if no_llm or not os.environ.get("GEMINI_API_KEY"):
+    if no_llm or not os.environ.get("GEMINI_API_KEY"):  # off unless --llm
         return fallback_summary(slug, frames, ents)
     from google.genai import types
     lines = [f"task_thread: {slug}",
@@ -362,8 +362,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--flush", action="store_true",
                     help="close the trailing session even if it may still be running")
-    ap.add_argument("--no-llm", action="store_true",
-                    help="deterministic narratives, no Gemini calls")
+    ap.add_argument("--no-llm", action="store_true", default=True,
+                    help="(default) deterministic narratives, no API calls")
+    ap.add_argument("--llm", dest="no_llm", action="store_false",
+                    help="opt in to Gemini session summaries (needs GEMINI_API_KEY)")
     ap.add_argument("--reset", action="store_true",
                     help="drop sessions/threads/entities and rebuild")
     args = ap.parse_args()

@@ -1,5 +1,4 @@
-# extraction + embedding layer
-google-genai>=1.0
+# extraction + embedding layer (all local: ocrmac -> BGE -> Actian)
 sentence-transformers>=3.0
 ocrmac>=1.0 ; sys_platform == "darwin"
 pillow>=10.0
@@ -12,3 +11,7 @@ pyobjc-framework-Cocoa ; sys_platform == "darwin"
 # MCP server (src/)
 mcp>=2.0.0
 actian-vectorai-client>=1.0.2
+
+# OPTIONAL - only for `extract.py --llm` / `sessionize.py --llm`. The default
+# pipeline (ocrmac -> BGE-small-en-v1.5 @384d -> Actian) makes no API calls.
+google-genai>=1.0

@@ -646,8 +646,10 @@ def main():
                     help="seconds between passes; 0 = single pass and exit")
     ap.add_argument("--dry-run", action="store_true",
                     help="build the prompt, print it, call nothing")
-    ap.add_argument("--no-llm", action="store_true",
-                    help="OCR only: store screen text, skip Gemini entirely")
+    ap.add_argument("--no-llm", action="store_true", default=True,
+                    help="(default) OCR only: store screen text, no API calls")
+    ap.add_argument("--llm", dest="no_llm", action="store_false",
+                    help="opt in to Gemini semantic extraction (needs GEMINI_API_KEY)")
     ap.add_argument("--reset", action="store_true",
                     help="wipe extractions and set frames.extracted = 0")
     args = ap.parse_args()

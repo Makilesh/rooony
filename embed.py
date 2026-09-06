@@ -4,7 +4,7 @@ embed.py -- BGE-small-en-v1.5 -> vectorstore. Text only, never images.
 
 The embedding path is entirely local: screenshots become text via ocrmac
 (Apple Vision) and that text is encoded by BAAI/bge-small-en-v1.5 at 384
-dims on this machine. No API key, no network, no images. Gemini is used
+dims on this machine. No API key, no network, no images. Gemini is optional and used
 only by extract.py / sessionize.py for the semantic extraction path.
 
 Emits exactly this record per row (this is the payload the endpoint / Actian

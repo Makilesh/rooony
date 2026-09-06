@@ -137,7 +137,10 @@ def _parse_window_regex(query):
 
 def parse_window(query):
     """-> (time_from, time_to, cleaned_query) as epoch seconds / str."""
-    if not os.environ.get("GEMINI_API_KEY"):
+    # Off by default: the regex parser handles the phrasings people type, and
+    # the retrieval path is meant to run with no API key and no network.
+    if os.environ.get("MEM_USE_LLM", "").strip() in ("", "0", "false") \
+            or not os.environ.get("GEMINI_API_KEY"):
         return _parse_window_regex(query)
     try:
         from google import genai

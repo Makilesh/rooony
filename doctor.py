@@ -52,10 +52,10 @@ def main():
     section("environment")
     print(f"     MEM_DIR={MEM_DIR}  MEM_DB={DB_PATH}")
     if os.environ.get("GEMINI_API_KEY"):
-        ok("GEMINI_API_KEY set")
+        ok("GEMINI_API_KEY set", "optional - only used by --llm extraction/summaries")
     else:
-        warn("GEMINI_API_KEY not set",
-             "extract/sessionize/recall fall back or exit; --no-llm still works")
+        ok("GEMINI_API_KEY not set",
+           "fine - capture, OCR, embedding and recall are fully local")
     print(f"     VECTOR_BACKEND={os.environ.get('VECTOR_BACKEND', 'sqlite')}")
 
     section("dependencies")
