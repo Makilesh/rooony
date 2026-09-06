@@ -163,15 +163,10 @@ how many seconds ago it was taken.
 
 ## Known issues
 
-- **Active-app detection sometimes reports "Terminal" regardless of the true
-  frontmost app.** During CP2/CP4 testing, `NSWorkspace.frontmostApplication()`
-  (used by `src/active_app.py`) consistently returned `Terminal` even after
-  manually switching focus to Chrome/VS Code and holding it there. A
-  cross-check against an independent AppleScript/`System Events` query was
-  set up but not completed. This does not block CP0–CP4 (capture itself
-  works; only the app-name tag may be wrong), but it means filenames may be
-  mislabeled with the wrong app name. Needs follow-up investigation before
-  relying on the app-name field for anything downstream.
+None currently open. (Previously: active-app detection could get stuck
+reporting whichever app was frontmost at process start — see the note in
+`src/active_app.py` on why `NSWorkspace.frontmostApplication()` needs a
+brief run-loop pump to stay live in a plain script. Fixed.)
 
 ## Project layout
 
