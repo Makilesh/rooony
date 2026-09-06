@@ -2,8 +2,8 @@
 
 Two families of tools:
 
-  Actian-native (unchanged from the MCP branch) - point-level lookups straight
-  out of the vector DB, no SQLite involved:
+  Frame level - individual captured moments, on whichever vector backend is
+  configured (sqlite by default, Actian when VECTOR_BACKEND=actian):
     search_by_time(start_iso, end_iso, limit)
     search_by_text(query, limit, start_iso, end_iso)
     ask(question, limit)
@@ -31,9 +31,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import memory  # noqa: E402  (repo root)
 
-from . import vectorstore  # noqa: E402
+import vectorstore  # noqa: E402  (repo root: routes to sqlite or actian)
+
 from .embeddings import embed_text  # noqa: E402
 from .time_parse import extract_time_window  # noqa: E402
+
+
+def _epoch(iso_ts):
+    from datetime import datetime
+    return datetime.fromisoformat(iso_ts).timestamp() if iso_ts else None
 
 mcp = MCPServer("actian-screen-activity")
 
@@ -78,7 +84,7 @@ def _format_sessions(sessions: list[dict]) -> str:
 def search_by_time(start_iso: str, end_iso: str, limit: int = 20) -> dict:
     """Look up recorded activity within an ISO 8601 time range (metadata-only, no embeddings)."""
     def go():
-        matches = vectorstore.search_by_time(start_iso, end_iso, limit=limit)
+        matches = vectorstore.points(None, limit, _epoch(start_iso), _epoch(end_iso))
         return {"answer": _format_answer(matches), "matches": matches}
     return _safe(go)
 
@@ -88,9 +94,8 @@ def search_by_text(query: str, limit: int = 5, start_iso: str = None,
                    end_iso: str = None) -> dict:
     """Semantic search over recorded screen text, optionally within a time window."""
     def go():
-        vector = embed_text(query)
-        matches = vectorstore.search_by_vector(vector, limit=limit,
-                                               start_iso=start_iso, end_iso=end_iso)
+        matches = vectorstore.points(embed_text(query), limit,
+                                     _epoch(start_iso), _epoch(end_iso))
         return {"answer": _format_answer(matches), "matches": matches}
     return _safe(go)
 
@@ -102,13 +107,12 @@ def ask(question: str, limit: int = 5) -> dict:
     def go():
         start_iso, end_iso = extract_time_window(question)
         if start_iso and end_iso:
-            matches = vectorstore.search_by_time(start_iso, end_iso, limit=limit)
+            lo, hi = _epoch(start_iso), _epoch(end_iso)
+            matches = vectorstore.points(None, limit, lo, hi)
             if not matches:
-                matches = vectorstore.search_by_vector(
-                    embed_text(question), limit=limit,
-                    start_iso=start_iso, end_iso=end_iso)
+                matches = vectorstore.points(embed_text(question), limit, lo, hi)
         else:
-            matches = vectorstore.search_by_vector(embed_text(question), limit=limit)
+            matches = vectorstore.points(embed_text(question), limit)
         return {"answer": _format_answer(matches), "matches": matches}
     return _safe(go)
 

@@ -85,8 +85,10 @@ python -m src.mcp_server
 | `what_was_i_doing(minutes_ago)` | session | the session covering that moment, its interruptions, the next action |
 | `todays_receipt()` | day | what got done today, framed as work accomplished |
 | `search_by_text(query, …)` | frame | semantic search over individual captured frames |
-| `search_by_time(start, end)` | frame | pure metadata range lookup, no embeddings |
+| `search_by_time(start, end)` | frame | pure time-range lookup, no embeddings |
 | `ask(question)` | frame | time expression + semantic search combined |
+
+All six work on either vector backend.
 
 Prefer the session-level tools for "what was I doing" questions: a session
 carries a narrative and a resume hint, a single frame does not.
@@ -105,6 +107,14 @@ downstream works identically on either backend.
 
 Records may be per-frame or per-session — several vectors can share a
 `session_id`, and `search()` collapses them to each session's best score.
+`points()` is the same query without that collapse, for frame-level answers.
+
+What has been indexed is tracked in SQLite (`vector_log`), not by asking the
+vector store — so re-running `embed.py` is a no-op on either backend, and a
+vector store that is down or wiped never causes silent re-embedding of
+everything. `embed.py --reset` clears it; on Actian that also drops and
+recreates the collection, which is how you change embedding dimensions (an
+existing collection's vector size cannot be altered in place).
 
 ## The record
 

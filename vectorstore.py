@@ -98,6 +98,24 @@ class ActianBackend:
                 best[sid] = float(score)
         return sorted(best.items(), key=lambda kv: kv[1], reverse=True)[:k]
 
+    def points(self, vector=None, k=20, time_from=None, time_to=None):
+        """Point-level hits (not collapsed to sessions), for the frame tools."""
+        iso = lambda t: datetime.fromtimestamp(t).isoformat() if t is not None else None
+        if vector is None:
+            return self.a.search_by_time(iso(time_from), iso(time_to), limit=k)
+        return self.a.search_by_vector([float(x) for x in vector], limit=k,
+                                       start_iso=iso(time_from), end_iso=iso(time_to))
+
+    def clear(self, dim=None):
+        """Drop and recreate the collection.
+
+        Also the fix for a dimension change: an existing collection's vector
+        size cannot be altered in place, so a collection left over from a
+        different embedding model must be recreated or every upsert fails.
+        """
+        self.a.ensure_collection(size=dim or 768, recreate=True)
+        self._ensured = True
+
     def count(self):
         return self.a.count()
 # ========================= end Actian block ==============================
@@ -174,10 +192,48 @@ class SqliteBackend:
                 best[sid] = float(s)
         return sorted(best.items(), key=lambda kv: kv[1], reverse=True)[:k]
 
+    def points(self, vector=None, k=20, time_from=None, time_to=None):
+        """Point-level hits (not collapsed to sessions), for the frame tools."""
+        sql = "SELECT record_id, session_id, started_at, vec, metadata FROM vectors WHERE 1=1"
+        args = []
+        if time_from is not None:
+            sql += " AND started_at >= ?"
+            args.append(int(time_from))
+        if time_to is not None:
+            sql += " AND started_at <= ?"
+            args.append(int(time_to))
+        rows = self.con.execute(sql + " ORDER BY started_at DESC", args).fetchall()
+        if not rows:
+            return []
+
+        scores = [None] * len(rows)
+        if vector is not None:
+            q = np.asarray(vector, dtype=np.float32)
+            qn = np.linalg.norm(q)
+            if qn:
+                q = q / qn
+            mat = np.frombuffer(b"".join(r["vec"] for r in rows),
+                                dtype=np.float32).reshape(len(rows), -1)
+            if mat.shape[1] != q.size:
+                raise ValueError(f"dim mismatch: index {mat.shape[1]}, query {q.size}")
+            scores = [float(x) for x in (mat @ q)]
+
+        out = []
+        for r, sc in zip(rows, scores):
+            payload = json.loads(r["metadata"] or "{}")
+            payload["id"] = r["record_id"]
+            payload.setdefault("description", payload.get("text", ""))
+            if sc is not None:
+                payload["score"] = sc
+            out.append(payload)
+        if vector is not None:
+            out.sort(key=lambda p: p["score"], reverse=True)
+        return out[:k]
+
     def count(self):
         return self.con.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
 
-    def clear(self):
+    def clear(self, dim=None):
         self.con.execute("DELETE FROM vectors")
         self.con.commit()
 
@@ -200,6 +256,18 @@ def upsert(session_id, vector, metadata) -> str:
 def search(vector, k, time_from=None, time_to=None):
     """-> [(session_id, cosine_score)], best first, one entry per session."""
     return backend().search(vector, k, time_from, time_to)
+
+
+def points(vector=None, k=20, time_from=None, time_to=None):
+    """Individual indexed records, newest or most similar first - NOT collapsed
+    to one hit per session. The frame-level MCP tools use this."""
+    return backend().points(vector, k, time_from, time_to)
+
+
+def clear(dim=None):
+    """Empty the index. On Actian this drops and recreates the collection,
+    which is also how you change embedding dimensions."""
+    return backend().clear(dim)
 
 
 def count():
