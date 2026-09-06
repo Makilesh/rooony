@@ -1,0 +1,12 @@
+services:
+  vectorai:
+    image: actian/vectorai:latest
+    container_name: vectorai
+    environment:
+      - ACTIAN_VECTORAI_ACCEPT_EULA=YES
+    ports:
+      - "6573:6573"
+      - "6574:6574" # gRPC API — used by the Python SDK
+      - "6575:6575" # local web UI
+    volumes:
+      - ./local_data:/var/lib/actian-vectorai

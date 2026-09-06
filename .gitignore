@@ -1,4 +1,12 @@
 .venv/
+venv/
+env/
 __pycache__/
 *.pyc
 .env
+local_data/
+frames/
+*.db
+*.db-wal
+*.db-shm
+daemon.log

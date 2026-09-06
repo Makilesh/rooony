@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "screen-memory": {
+      "command": "python3",
+      "args": ["-m", "src.mcp_server"],
+      "env": {
+        "VECTOR_BACKEND": "sqlite"
+      }
+    }
+  }
+}

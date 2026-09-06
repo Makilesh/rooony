@@ -22,8 +22,8 @@ That keeps the return type stable whatever granularity embed.py uses.
 import json
 import os
 import sqlite3
-import struct
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -34,57 +34,72 @@ BACKEND = os.environ.get("VECTOR_BACKEND", "sqlite").strip().lower()
 
 
 # =========================================================================
-# ACTIAN VECTORAI -- TODO: swap in the real client once the signatures land.
-# Nothing outside this block knows Actian exists. Keep it that way.
+# ACTIAN VECTORAI
 #
-# Expected env:
-#   ACTIAN_VECTOR_URL      e.g. https://<host>:<port>
-#   ACTIAN_VECTOR_API_KEY
-#   ACTIAN_VECTOR_DB       database / vector store name
-#   ACTIAN_VECTOR_TABLE    default "screen_memory"
+# The real SDK calls live in src/vectorstore.py (the MCP side wrote and proved
+# them against a live server). This class is only the adapter that puts them
+# behind the same upsert/search interface the rest of the pipeline uses, so
+# there is exactly ONE place that talks to Actian.
 #
-# The record we hand it (same JSON embed.py emits):
-#   {session_id, timestamp, embedding[768], application, text, source}
+# Env: VECTORAI_HOST (default localhost:6574), VECTORAI_COLLECTION
+#      (default screen_activity). docker-compose.yml brings the server up.
+#
+# Payload written per point (their MCP tools read description/application/
+# activity; memory.py reads session_id/thread_slug/started_at):
+#   {session_id, thread_slug, timestamp, timestamp_epoch, application,
+#    activity, text, description, source, record_id}
 # =========================================================================
 class ActianBackend:
-    TABLE = os.environ.get("ACTIAN_VECTOR_TABLE", "screen_memory")
-
     def __init__(self):
-        self.url = os.environ.get("ACTIAN_VECTOR_URL")
-        self.api_key = os.environ.get("ACTIAN_VECTOR_API_KEY")
-        self.db = os.environ.get("ACTIAN_VECTOR_DB")
-        if not (self.url and self.api_key):
-            raise RuntimeError(
-                "VECTOR_BACKEND=actian but ACTIAN_VECTOR_URL / "
-                "ACTIAN_VECTOR_API_KEY are not set")
-        # TODO(actian): construct the real client, e.g.
-        #   from actian_vectorai import Client
-        #   self.client = Client(url=self.url, api_key=self.api_key, database=self.db)
-        #   self.client.create_collection(self.TABLE, dim=768, metric="cosine")
-        self.client = None
-        raise RuntimeError(
-            "Actian client not wired yet - see the TODO block in vectorstore.py. "
-            "Run with VECTOR_BACKEND=sqlite until then.")
+        # imported lazily: embed.py imports this module, so a top-level import
+        # of src.* (which imports embed) would be circular
+        from src import vectorstore as actian
+        self.a = actian
+        self.host = actian.config.VECTORAI_HOST
+        self.collection = actian.config.COLLECTION
+        self._ensured = False
+
+    def _ensure(self, dim):
+        if not self._ensured:
+            self.a.ensure_collection(size=dim)
+            self._ensured = True
 
     def upsert(self, session_id, vector, metadata):
-        # TODO(actian): one row per record_id, cosine metric, 768 dims.
-        #   rec = {"id": metadata["record_id"], "session_id": session_id,
-        #          "embedding": list(vector), **metadata}
-        #   self.client.upsert(self.TABLE, [rec])
-        #   return metadata["record_id"]
-        raise NotImplementedError
+        v = [float(x) for x in vector]
+        self._ensure(len(v))
+        rid = str(metadata.get("record_id") or f"session:{session_id}")
+        text = metadata.get("text", "")
+        record = {
+            "timestamp": metadata.get("timestamp"),
+            "embedding": v,
+            "session_id": session_id,
+            "thread_slug": metadata.get("thread_slug"),
+            "application": metadata.get("application"),
+            "activity": metadata.get("activity"),
+            "text": text,
+            "description": text,      # what the MCP tools' formatter reads
+            "source": metadata.get("source"),
+            "record_id": rid,
+        }
+        self.a.upsert_activity(rid, record)   # flushes; unflushed writes are invisible
+        return rid
 
     def search(self, vector, k, time_from=None, time_to=None):
-        # TODO(actian): push the time window down as a metadata filter, e.g.
-        #   flt = {"started_at": {"$gte": time_from, "$lte": time_to}}
-        #   hits = self.client.search(self.TABLE, vector=list(vector),
-        #                             top_k=k * 4, filter=flt, metric="cosine")
-        # then collapse hits to one row per session_id, best score first:
-        #   return dedupe([(h["session_id"], h["score"]) for h in hits])[:k]
-        raise NotImplementedError
+        iso = lambda t: datetime.fromtimestamp(t).isoformat() if t is not None else None
+        hits = self.a.search_by_vector(
+            [float(x) for x in vector], limit=max(k * 4, k),
+            start_iso=iso(time_from), end_iso=iso(time_to))
+        best = {}
+        for h in hits:
+            sid, score = h.get("session_id"), h.get("score")
+            if sid is None or score is None:
+                continue          # points written by something else (e.g. their seed script)
+            if score > best.get(sid, -2.0):
+                best[sid] = float(score)
+        return sorted(best.items(), key=lambda kv: kv[1], reverse=True)[:k]
 
     def count(self):
-        raise NotImplementedError
+        return self.a.count()
 # ========================= end Actian block ==============================
 
 

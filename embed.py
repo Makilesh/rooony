@@ -154,7 +154,7 @@ def already_indexed(record_id):
 def frame_rows(con, limit, force):
     rows = con.execute("""
         SELECT e.frame_id, e.ts, e.app, e.window_title, e.ocr_text, e.summary,
-               e.task_thread, e.entities
+               e.task_thread, e.entities, e.activity_type
         FROM extractions e ORDER BY e.ts LIMIT ?""", (limit,)).fetchall()
     out = []
     for r in rows:
@@ -178,6 +178,7 @@ def frame_rows(con, limit, force):
             "source": SOURCE_FRAME,
             "_ts": r["ts"],
             "_thread": r["task_thread"],
+            "_activity": r["activity_type"],
         })
     return out
 
@@ -203,6 +204,7 @@ def session_rows(con, limit, force):
             "source": SOURCE_SESSION,
             "_ts": r["started_at"],
             "_thread": r["thread_slug"],
+            "_activity": None,
         })
     return out
 
@@ -259,6 +261,7 @@ def run(level, limit, force, emit, out_path):
                 "started_at": r["_ts"],
                 "timestamp": r["timestamp"],
                 "application": r["application"],
+                "activity": r["_activity"],
                 "source": r["source"],
                 "text": r["text"][:500],
             })
