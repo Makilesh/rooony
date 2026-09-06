@@ -1,0 +1,6 @@
+actian-vectorai-client>=1.0.2
+sentence-transformers>=3.0.0
+Pillow>=10.0
+numpy>=1.26
+python-dateutil>=2.9
+mcp>=2.0.0

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "actian-screen-activity": {
+      "command": "D:\\PLAYGROUND\\rooony\\env\\Scripts\\python.exe",
+      "args": ["-m", "src.mcp_server"],
+      "cwd": "D:\\PLAYGROUND\\rooony"
+    }
+  }
+}
