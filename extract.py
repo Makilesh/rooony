@@ -14,6 +14,7 @@ row rather than duplicating it. Nothing is written unless the whole batch
 came back.
 
     uv run extract.py                # one pass over the backlog
+    uv run extract.py --no-llm       # OCR only, no Gemini calls at all
     uv run extract.py --watch 5      # poll forever
     uv run extract.py --dry-run      # OCR + prompt only, no API call
     uv run extract.py --reset        # mark everything unextracted again
@@ -111,11 +112,15 @@ def ensure_schema(con):
             resume_hint   TEXT,
             activity_type TEXT,
             sensitive     INTEGER DEFAULT 0,
+            ocr_text      TEXT,          -- raw Apple Vision text, kept for embedding
             ocr_chars     INTEGER,
             used_vision   INTEGER DEFAULT 0,
             extracted_at  INTEGER
         )
     """)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(extractions)")}
+    if "ocr_text" not in cols:            # migrate DBs made before ocr_text existed
+        con.execute("ALTER TABLE extractions ADD COLUMN ocr_text TEXT")
     con.execute("CREATE INDEX IF NOT EXISTS idx_ext_ts ON extractions(ts)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_ext_thread ON extractions(task_thread)")
     con.commit()
@@ -224,7 +229,8 @@ def build_batch(rows, known):
     for i, r in enumerate(rows):
         text = ocr_image(r["image_path"])
         used_vision = len(text) < OCR_MIN_CHARS
-        meta.append({"frame_id": r["id"], "ocr_chars": len(text), "used_vision": 0})
+        meta.append({"frame_id": r["id"], "ocr_chars": len(text),
+                     "ocr_text": text[:MAX_OCR_CHARS], "used_vision": 0})
 
         when = time.strftime("%a %H:%M", time.localtime(r["ts"]))
         block = [
@@ -323,19 +329,83 @@ def write_batch(con, rows, items, meta):
         con.execute("""
             INSERT OR REPLACE INTO extractions
               (frame_id, ts, app, window_title, image_path, summary, task_thread,
-               entities, resume_hint, activity_type, sensitive, ocr_chars,
-               used_vision, extracted_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?)
+               entities, resume_hint, activity_type, sensitive, ocr_text,
+               ocr_chars, used_vision, extracted_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)
         """, (row["id"], row["ts"], row["app"], row["window_title"], row["image_path"],
               it.summary.strip(), slugify(it.task_thread),
               json.dumps([e.strip() for e in it.entities if e and e.strip()]),
-              it.resume_hint.strip(), it.activity_type,
+              it.resume_hint.strip(), it.activity_type, meta[i].get("ocr_text", ""),
               meta[i]["ocr_chars"], meta[i]["used_vision"], now))
         con.execute("UPDATE frames SET extracted = 1 WHERE id = ?", (row["id"],))
         kept += 1
 
     con.commit()
     return kept, deleted, filled
+
+
+# --- ocr-only pass (no Gemini at all) -------------------------------------
+SENSITIVE_HINTS = (
+    "account balance", "available balance", "routing number", "account number",
+    "credit card", "chase online", "bank of america", "wells fargo", "paypal",
+    "password", "passphrase", "api key", "secret key", "private key",
+    "1password", "keychain", "two-factor", "verification code", "ssn",
+)
+
+APP_ACTIVITY = {
+    "code": "coding", "visual studio code": "coding", "xcode": "coding",
+    "terminal": "coding", "iterm": "coding", "iterm2": "coding",
+    "slack": "comms", "discord": "comms", "messages": "comms", "mail": "comms",
+    "zoom": "comms", "notion": "admin", "linear": "admin", "figma": "admin",
+    "preview": "reading", "books": "reading", "spotify": "media",
+}
+
+
+def looks_sensitive(text, title):
+    hay = f"{text}\n{title}".lower()
+    return any(h in hay for h in SENSITIVE_HINTS)
+
+
+def no_llm_pass(con, limit):
+    """OCR only: store the screen text, coarse app-derived thread, no Gemini.
+
+    Enough for the embedding layer (text + application + timestamp); the
+    Gemini fields stay empty until extract.py runs without --no-llm.
+    """
+    rows = pending_frames(con, limit)
+    if not rows:
+        return 0
+    now, kept, dropped = int(time.time()), 0, 0
+    for r in rows:
+        text = ocr_image(r["image_path"])
+        if looks_sensitive(text, r["window_title"] or ""):
+            con.execute("DELETE FROM extractions WHERE frame_id = ?", (r["id"],))
+            con.execute("DELETE FROM frames WHERE id = ?", (r["id"],))
+            p = Path(r["image_path"] or "")
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+            dropped += 1
+            print(f"  [sensitive] dropped frame {r['id']} ({r['app']})")
+            continue
+        app = (r["app"] or "unknown").strip()
+        con.execute("""
+            INSERT OR REPLACE INTO extractions
+              (frame_id, ts, app, window_title, image_path, summary, task_thread,
+               entities, resume_hint, activity_type, sensitive, ocr_text,
+               ocr_chars, used_vision, extracted_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,0,?)
+        """, (r["id"], r["ts"], app, r["window_title"], r["image_path"],
+              (r["window_title"] or app), slugify(app), "[]", "",
+              APP_ACTIVITY.get(app.lower(), "admin"), text[:MAX_OCR_CHARS],
+              len(text), now))
+        con.execute("UPDATE frames SET extracted = 1 WHERE id = ?", (r["id"],))
+        kept += 1
+    con.commit()
+    print(f"[ocr-only] {kept} frames stored, {dropped} sensitive dropped, no API calls")
+    return kept + dropped
 
 
 # --- passes ---------------------------------------------------------------
@@ -382,6 +452,8 @@ def main():
                     help="seconds between passes; 0 = single pass and exit")
     ap.add_argument("--dry-run", action="store_true",
                     help="build the prompt, print it, call nothing")
+    ap.add_argument("--no-llm", action="store_true",
+                    help="OCR only: store screen text, skip Gemini entirely")
     ap.add_argument("--reset", action="store_true",
                     help="wipe extractions and set frames.extracted = 0")
     args = ap.parse_args()
@@ -396,8 +468,11 @@ def main():
         print("reset: all frames pending again")
         return
 
+    passer = (lambda: no_llm_pass(con, args.limit)) if args.no_llm else \
+             (lambda: one_pass(con, args.limit, args.dry_run))
+
     if not args.watch:
-        n = one_pass(con, args.limit, args.dry_run)
+        n = passer()
         left = con.execute("SELECT COUNT(*) FROM frames WHERE extracted=0").fetchone()[0]
         print(f"done: {n} frames handled, {left} still pending")
         return
@@ -405,7 +480,7 @@ def main():
     print(f"watching {DB_PATH} every {args.watch}s (ctrl-c to stop)")
     try:
         while True:
-            if one_pass(con, args.limit, args.dry_run) == 0:
+            if passer() == 0:
                 time.sleep(args.watch)
     except KeyboardInterrupt:
         print("\nstopped")
