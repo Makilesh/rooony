@@ -136,6 +136,31 @@ Unloads the LaunchAgent and removes the plist. No more captures should
 happen after this (`launchctl list | grep com.thryambak.screenshotdaemon`
 should print nothing).
 
+## CP6 (optional stretch): retention + status
+
+Two extra `config.json` fields, both optional and `null`/disabled by default:
+
+```json
+{
+  "max_files": 500,
+  "max_age_days": 7
+}
+```
+
+- `max_files`: after each capture, keep only the N most recently modified
+  files in `output_dir`; older ones are deleted.
+- `max_age_days`: delete any file older than this many days.
+
+Both can be set together. Cleanup runs once per capture cycle, right after
+a successful capture.
+
+Check status without starting the loop:
+```bash
+venv/bin/python src/main.py --status
+```
+Prints `output_dir`, total capture count, and the most recent filename +
+how many seconds ago it was taken.
+
 ## Known issues
 
 - **Active-app detection sometimes reports "Terminal" regardless of the true

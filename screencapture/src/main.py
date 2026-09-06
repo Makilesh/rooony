@@ -1,7 +1,9 @@
 """
 CP4: continuous capture loop (foreground).
+CP6 (optional stretch): retention cleanup + --status.
 
     venv/bin/python src/main.py
+    venv/bin/python src/main.py --status
 """
 import logging
 import signal
@@ -12,6 +14,7 @@ from pathlib import Path
 
 from capture import CaptureError, take_screenshot
 from config import ConfigError, load_config
+from retention import enforce_retention
 
 LOG_PATH = Path(__file__).resolve().parent.parent / "daemon.log"
 
@@ -44,6 +47,8 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     interval = cfg["interval_seconds"]
     output_dir = cfg["output_dir"]
     capture_app_name = cfg["capture_app_name"]
+    max_files = cfg["max_files"]
+    max_age_days = cfg["max_age_days"]
 
     next_run = time.monotonic()
 
@@ -53,6 +58,10 @@ def run(cfg: dict, logger: logging.Logger) -> None:
             path = take_screenshot(output_dir, capture_app_name=capture_app_name)
             elapsed_ms = int((time.monotonic() - start) * 1000)
             logger.info("captured file=%s took_ms=%d", path.name, elapsed_ms)
+            if max_files is not None or max_age_days is not None:
+                deleted = enforce_retention(output_dir, max_files=max_files, max_age_days=max_age_days)
+                if deleted:
+                    logger.info("retention: deleted %d old file(s)", deleted)
         except CaptureError as e:
             logger.error("capture failed: %s", e)
 
@@ -75,14 +84,33 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     logger.info("stopped")
 
 
-def main() -> None:
-    logger = setup_logging()
+def print_status(cfg: dict) -> None:
+    output_dir = Path(cfg["output_dir"])
+    files = [p for p in output_dir.iterdir() if p.is_file()] if output_dir.is_dir() else []
 
+    print(f"output_dir: {output_dir}")
+    print(f"total captures: {len(files)}")
+
+    if files:
+        latest = max(files, key=lambda p: p.stat().st_mtime)
+        age_s = int(time.time() - latest.stat().st_mtime)
+        print(f"last capture: {latest.name} ({age_s}s ago)")
+    else:
+        print("last capture: none")
+
+
+def main() -> None:
     try:
         cfg = load_config()
     except ConfigError as e:
-        logger.error("config error: %s", e)
+        print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
+
+    if "--status" in sys.argv[1:]:
+        print_status(cfg)
+        return
+
+    logger = setup_logging()
 
     logger.info(
         "starting: interval=%ds output_dir=%s capture_app_name=%s",

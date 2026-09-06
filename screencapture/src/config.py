@@ -14,6 +14,8 @@ DEFAULTS = {
     "interval_seconds": 60,
     "output_dir": "~/mem/frames",
     "capture_app_name": True,
+    "max_files": None,
+    "max_age_days": None,
 }
 
 MIN_INTERVAL = 10
@@ -49,6 +51,11 @@ def load_config(path=DEFAULT_CONFIG_PATH) -> dict:
         )
 
     cfg["output_dir"] = str(Path(cfg["output_dir"]).expanduser())
+
+    for key in ("max_files", "max_age_days"):
+        value = cfg.get(key)
+        if value is not None and (not isinstance(value, int) or value <= 0):
+            raise ConfigError(f"{key} must be a positive integer or null, got: {value!r}")
 
     return cfg
 
