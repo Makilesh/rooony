@@ -175,34 +175,49 @@ def recency_decay(ended_at, now=None):
 
 
 def entity_hits(con, cleaned, time_from, time_to):
-    """Exact (case-insensitive) entity match -> {session_id: [entities]}."""
+    """Entity match -> ({session_id: [entities]}, {session_id: {tokens}}, tokens).
+
+    Both the exact and the substring pass are constrained to the same time
+    window. The substring pass used to run unfiltered, so a query like "what
+    was that cors bug this morning" returned afternoon sessions as if they were
+    inside the requested window - the answer contradicted its own `window`.
+    """
     tokens = [t for t in re.findall(r"[A-Za-z0-9_.:/#-]+", cleaned.lower())
               if len(t) > 2 and t not in STOP]
     if not tokens:
-        return {}, []
+        return {}, {}, []
+
+    def window_sql(where):
+        sql = (f"SELECT e.session_id, e.entity FROM entities e JOIN sessions s "
+               f"ON s.id = e.session_id WHERE {where}")
+        args = []
+        if time_from is not None:
+            sql += " AND s.ended_at >= ?"
+            args.append(int(time_from))
+        if time_to is not None:
+            sql += " AND s.started_at <= ?"
+            args.append(int(time_to))
+        return sql, args
+
+    hits, matched = {}, {}
+
+    def record(sid, entity, tok):
+        hits.setdefault(sid, [])
+        if entity not in hits[sid]:
+            hits[sid].append(entity)
+        matched.setdefault(sid, set()).add(tok)
+
     ph = ",".join("?" * len(tokens))
-    sql = (f"SELECT e.session_id, e.entity FROM entities e JOIN sessions s "
-           f"ON s.id = e.session_id WHERE lower(e.entity) IN ({ph})")
-    args = list(tokens)
-    if time_from is not None:
-        sql += " AND s.ended_at >= ?"
-        args.append(int(time_from))
-    if time_to is not None:
-        sql += " AND s.started_at <= ?"
-        args.append(int(time_to))
-    hits = {}
-    for r in con.execute(sql, args):
-        hits.setdefault(r["session_id"], []).append(r["entity"])
+    sql, args = window_sql(f"lower(e.entity) IN ({ph})")
+    for r in con.execute(sql, list(tokens) + args):
+        record(r["session_id"], r["entity"], r["entity"].lower())
+
     # substring pass for things like "cors" inside "cors-preflight-fix"
     for tok in tokens:
-        like = f"%{tok}%"
-        for r in con.execute(
-                "SELECT session_id, entity FROM entities WHERE lower(entity) LIKE ?",
-                (like,)):
-            hits.setdefault(r["session_id"], [])
-            if r["entity"] not in hits[r["session_id"]]:
-                hits[r["session_id"]].append(r["entity"])
-    return hits, tokens
+        sql, args = window_sql("lower(e.entity) LIKE ?")
+        for r in con.execute(sql, [f"%{tok}%"] + args):
+            record(r["session_id"], r["entity"], tok)
+    return hits, matched, tokens
 
 
 def like_fallback(con, cleaned, time_from, time_to, limit):
@@ -229,7 +244,7 @@ def like_fallback(con, cleaned, time_from, time_to, limit):
 def recall_context(query: str, limit: int = 5) -> dict:
     con = connect()
     time_from, time_to, cleaned = parse_window(query)
-    ents, tokens = entity_hits(con, cleaned, time_from, time_to)
+    ents, matched, tokens = entity_hits(con, cleaned, time_from, time_to)
 
     cosines, degraded = {}, None
     try:
@@ -250,7 +265,10 @@ def recall_context(query: str, limit: int = 5) -> dict:
             if not r:
                 continue
             cos = max(cosines.get(sid, 0.0), 0.0)
-            overlap = (len(ents.get(sid, [])) / len(tokens)) if tokens else 0.0
+            # fraction of the query's TOKENS that matched, not the number of
+            # entity strings hit: a session with 9 entities containing "cors"
+            # is not a better match than one with a single exact "cors" hit.
+            overlap = (len(matched.get(sid, ())) / len(tokens)) if tokens else 0.0
             overlap = min(overlap, 1.0)
             rec = recency_decay(r["ended_at"], now)
             score = W_COSINE * cos + W_ENTITY * overlap + W_RECENCY * rec
@@ -270,6 +288,14 @@ def recall_context(query: str, limit: int = 5) -> dict:
             o["matched_entities"] = []
             scored.append(o)
         degraded = degraded or "no vector hits; SQLite LIKE fallback"
+
+    # A parsed window that contains no indexed vectors leaves every cosine at
+    # 0.0. Ranking then runs on entities+recency alone, which is a materially
+    # weaker answer, so say so instead of returning it as if it were normal.
+    if degraded is None and cosines == {} and scored:
+        degraded = ("no vectors in the requested window; ranked on entities and "
+                    "recency only" if (time_from or time_to) else
+                    "vector search returned no hits; ranked on entities and recency only")
 
     scored.sort(key=lambda o: o["score"], reverse=True)
     top = scored[:limit]

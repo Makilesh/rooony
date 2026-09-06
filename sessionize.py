@@ -184,6 +184,7 @@ def group_frames(rows):
 
 
 # --- summarising ----------------------------------------------------------
+USAGE = {"calls": 0, "prompt": 0, "output": 0, "total": 0}
 _client = None
 
 
@@ -235,9 +236,16 @@ def summarise(slug, frames, ents, no_llm=False):
         try:
             r = client().models.generate_content(
                 model=MODEL, contents="\n".join(lines), config=cfg)
+            u = getattr(r, "usage_metadata", None)
+            if u:
+                USAGE["calls"] += 1
+                USAGE["prompt"] += getattr(u, "prompt_token_count", 0) or 0
+                USAGE["output"] += getattr(u, "candidates_token_count", 0) or 0
+                USAGE["total"] += getattr(u, "total_token_count", 0) or 0
             return r.parsed or SessionSummary(**json.loads(r.text))
         except Exception as e:
-            if attempt == 3:
+            import extract                      # one definition of "retryable"
+            if attempt == 3 or not extract._retryable(e):
                 print(f"[gemini] giving up on {slug}: {e}", file=sys.stderr)
                 return fallback_summary(slug, frames, ents)
             time.sleep(2 ** (attempt + 1))
@@ -345,6 +353,9 @@ def run(con, flush=False, no_llm=False):
     refresh_threads(con)
     print(f"{written} sessions written, {skipped} unchanged, "
           f"{len(groups)} groups from {len(rows)} frames")
+    if USAGE["calls"]:
+        print(f"[usage] {USAGE['calls']} {MODEL} calls, {USAGE['prompt']} prompt "
+              f"+ {USAGE['output']} output = {USAGE['total']} tokens")
 
 
 def main():

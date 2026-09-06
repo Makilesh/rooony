@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-embed.py -- gemini-embedding-001 -> vectorstore. Text only, never images.
+embed.py -- BGE-small-en-v1.5 -> vectorstore. Text only, never images.
+
+The embedding path is entirely local: screenshots become text via ocrmac
+(Apple Vision) and that text is encoded by BAAI/bge-small-en-v1.5 at 384
+dims on this machine. No API key, no network, no images. Gemini is used
+only by extract.py / sessionize.py for the semantic extraction path.
 
 Emits exactly this record per row (this is the payload the endpoint / Actian
 gets, and what lands in vector metadata):
@@ -8,7 +13,7 @@ gets, and what lands in vector metadata):
     {
       "session_id": 25,
       "timestamp": "2026-09-06T12:15:00",
-      "embedding": [ ... 768 floats ... ],
+      "embedding": [ ... 384 floats ... ],
       "application": "VS Code",
       "text": "roony group chat",
       "source": "screen_image"
@@ -44,13 +49,17 @@ from datetime import datetime
 from pathlib import Path
 
 # --- the one place the embedding model is named -------------------------
-EMBED_MODEL = "gemini-embedding-001"
-EMBED_DIM = 768
-TASK_DOCUMENT = "RETRIEVAL_DOCUMENT"
-TASK_QUERY = "RETRIEVAL_QUERY"
+EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+EMBED_DIM = 384
+TASK_DOCUMENT = "document"
+TASK_QUERY = "query"
+# bge-* is trained with an asymmetric instruction: queries carry this prefix,
+# stored passages carry nothing. Using it on one side only is the whole point;
+# prefixing both (or neither) is what makes cosine collapse toward a constant.
+QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 # ------------------------------------------------------------------------
 
-BATCH = 16
+BATCH = 32
 MAX_TEXT_CHARS = 8000
 SOURCE_FRAME = "screen_image"
 SOURCE_SESSION = "session_summary"
@@ -74,22 +83,29 @@ def iso(ts):
 
 
 # --- embedding ------------------------------------------------------------
-_client = None
+_model = None
 
 
-def client():
-    global _client
-    if _client is None:
-        from google import genai
-        key = os.environ.get("GEMINI_API_KEY")
-        if not key:
-            sys.exit("GEMINI_API_KEY is not set (or use MEM_FAKE_EMBED=1)")
-        _client = genai.Client(api_key=key)
-    return _client
+def model():
+    """The local SentenceTransformer. Loaded once, on first use."""
+    global _model
+    if _model is None:
+        from sentence_transformers import SentenceTransformer
+        t0 = time.time()
+        _model = SentenceTransformer(EMBED_MODEL)
+        # renamed in sentence-transformers 5.x; support both
+        get_dim = getattr(_model, "get_embedding_dimension", None) or \
+                  _model.get_sentence_embedding_dimension
+        dim = get_dim()
+        if dim != EMBED_DIM:
+            sys.exit(f"{EMBED_MODEL} reports {dim} dims, EMBED_DIM says {EMBED_DIM}")
+        print(f"[embed] loaded {EMBED_MODEL} ({dim}d) in {time.time() - t0:.1f}s",
+              file=sys.stderr)
+    return _model
 
 
 def _fake_vector(text):
-    """Deterministic pseudo-embedding so the chain runs with no API key."""
+    """Deterministic pseudo-embedding so the chain runs with no model at all."""
     import numpy as np
     seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "little")
     v = np.random.default_rng(seed).normal(size=EMBED_DIM)
@@ -97,41 +113,23 @@ def _fake_vector(text):
 
 
 def embed_texts(texts, task_type=TASK_DOCUMENT):
-    """-> list of unit-length EMBED_DIM vectors, one per input text."""
+    """-> list of unit-length EMBED_DIM vectors, one per input text.
+
+    Local, synchronous, no network. normalize_embeddings=True means cosine is
+    a plain dot product everywhere downstream.
+    """
     if FAKE:
         return [_fake_vector(t) for t in texts]
 
-    import numpy as np
-    from google.genai import types
-
-    out = []
-    for i in range(0, len(texts), BATCH):
-        chunk = [t[:MAX_TEXT_CHARS] or " " for t in texts[i:i + BATCH]]
-        cfg = types.EmbedContentConfig(task_type=task_type,
-                                       output_dimensionality=EMBED_DIM)
-        for attempt in range(6):
-            try:
-                r = client().models.embed_content(model=EMBED_MODEL,
-                                                  contents=chunk, config=cfg)
-                break
-            except Exception as e:
-                m = f"{type(e).__name__} {e}".upper()
-                retryable = any(t in m for t in ("429", "RESOURCE_EXHAUSTED", "503",
-                                                 "500", "UNAVAILABLE", "TIMEOUT"))
-                if attempt == 5 or not retryable:
-                    raise
-                wait = min(2 ** (attempt + 1), 60)
-                print(f"[embed] {type(e).__name__}: retry in {wait}s", file=sys.stderr)
-                time.sleep(wait)
-        for e in r.embeddings:
-            v = np.asarray(e.values, dtype=float)
-            n = np.linalg.norm(v)          # <3072 dims come back un-normalised
-            out.append((v / n if n else v).tolist())
-    return out
+    prefix = QUERY_PREFIX if task_type == TASK_QUERY else ""
+    chunks = [prefix + (t[:MAX_TEXT_CHARS] or " ") for t in texts]
+    vecs = model().encode(chunks, batch_size=BATCH, normalize_embeddings=True,
+                          show_progress_bar=False, convert_to_numpy=True)
+    return [v.astype(float).tolist() for v in vecs]
 
 
 def embed_query(text):
-    """One query vector. Used by memory.py."""
+    """One query vector, with the bge query instruction prefix. Used by memory.py."""
     return embed_texts([text], task_type=TASK_QUERY)[0]
 
 

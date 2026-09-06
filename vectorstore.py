@@ -10,7 +10,7 @@ Public interface, identical on both backends:
 Pick the backend with VECTOR_BACKEND=sqlite (default) | actian.
 
 The sqlite backend is a brute-force cosine scan over a `vectors` table in the
-same mem.db. At hackathon scale (thousands of rows x 768 dims) it answers in
+same mem.db. At hackathon scale (thousands of rows x 384 dims) it answers in
 low milliseconds, so nothing downstream ever has to wait for Actian.
 
 Records may be per-session or per-frame: several vectors can carry the same
@@ -113,7 +113,10 @@ class ActianBackend:
         size cannot be altered in place, so a collection left over from a
         different embedding model must be recreated or every upsert fails.
         """
-        self.a.ensure_collection(size=dim or 768, recreate=True)
+        if dim is None:
+            import embed                     # local: embed imports this module
+            dim = embed.EMBED_DIM
+        self.a.ensure_collection(size=dim, recreate=True)
         self._ensured = True
 
     def count(self):
@@ -279,8 +282,9 @@ if __name__ == "__main__":
     b = backend()
     print(f"rows indexed: {b.count()}")
     if "--self-test" in sys.argv:
+        import embed
         rng = np.random.default_rng(0)
-        a = rng.normal(size=768)
+        a = rng.normal(size=embed.EMBED_DIM)
         upsert(-1, a, {"record_id": "selftest:-1", "started_at": 0, "source": "test"})
         hits = search(a, 3)
         print("self-test hit:", hits[0] if hits else None)

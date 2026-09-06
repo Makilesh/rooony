@@ -10,7 +10,7 @@ the real schema arrives):
 
     {
         "timestamp": "2026-09-06T12:15:00",  # ISO 8601, local time
-        "embedding": [...],                   # EMBED_DIM floats
+        "embedding": [...],                   # EMBED_DIM (384) floats
         "activity": "coding",
         "application": "VS Code",
         "description": "Debugging pandas contact matching",
@@ -52,9 +52,8 @@ def ensure_collection(size: int = None, recreate: bool = False):
     """Create the collection if it doesn't exist yet. Safe to call repeatedly.
 
     Pass recreate=True to drop and recreate it — needed when switching
-    embedding models/dimensions (e.g. text-only MiniLM 384-dim -> CLIP
-    512-dim), since an existing collection's vector size can't be changed
-    in place.
+    embedding models/dimensions, since an existing collection's vector size
+    can't be changed in place.
     """
     from actian_vectorai import VectorParams, Distance
 

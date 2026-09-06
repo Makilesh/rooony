@@ -6,7 +6,7 @@ Run this first after merging screencapture/ in, and any time the chain looks
 wrong. It never writes to `frames`.
 
     uv run doctor.py                 # offline checks only
-    uv run doctor.py --live          # also spend ~2 API calls to prove the keys work
+    uv run doctor.py --live          # also load bge-small-en-v1.5 and spend 1 API call
 
 Exit code 0 = everything needed to run is in place, 1 = something is broken.
 """
@@ -46,7 +46,7 @@ def section(name):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--live", action="store_true",
-                    help="make one real Gemini call and one real embedding call")
+                    help="load the local embedding model and make one real Gemini call")
     args = ap.parse_args()
 
     section("environment")
@@ -59,13 +59,15 @@ def main():
     print(f"     VECTOR_BACKEND={os.environ.get('VECTOR_BACKEND', 'sqlite')}")
 
     section("dependencies")
-    for mod, why in [("google.genai", "Gemini + embeddings"), ("PIL", "seed.py"),
-                     ("numpy", "cosine"), ("pydantic", "response_schema")]:
+    for mod, why in [("google.genai", "Gemini extraction"), ("PIL", "seed.py"),
+                     ("numpy", "cosine"), ("pydantic", "response_schema"),
+                     ("sentence_transformers", "local bge-small-en-v1.5 embeddings")]:
         try:
             __import__(mod)
             ok(f"{mod} importable", why)
         except Exception as e:
-            bad(f"{mod} missing ({why})", f"uv pip install google-genai pillow numpy pydantic  [{e}]")
+            bad(f"{mod} missing ({why})",
+                f"uv pip install -r requirements.txt  [{e}]")
     try:
         from ocrmac import ocrmac  # noqa: F401
         ok("ocrmac importable", "Apple Vision OCR available")
@@ -256,16 +258,22 @@ def main():
                  "frames like this get sent to Gemini vision instead")
 
     if args.live:
-        section("live api")
+        section("embedding model (local, no API call)")
         try:
             import embed
             t0 = time.time()
             v = embed.embed_query("cors preflight")
-            ok(f"embedding call ok", f"{len(v)}d in {time.time() - t0:.2f}s")
+            ok(f"{embed.EMBED_MODEL} ok", f"{len(v)}d in {time.time() - t0:.2f}s")
+            if len(v) != embed.EMBED_DIM:
+                bad(f"query embedding is {len(v)}d, EMBED_DIM says {embed.EMBED_DIM}")
             if abs(sum(x * x for x in v) ** 0.5 - 1.0) > 0.01:
                 bad("query embedding is not unit length", "check normalization in embed.py")
+            else:
+                ok("query embedding is unit length")
         except Exception as e:
-            bad(f"embedding call failed: {type(e).__name__}: {e}")
+            bad(f"embedding failed: {type(e).__name__}: {e}")
+
+        section("live api")
         try:
             from google import genai
             from google.genai import types

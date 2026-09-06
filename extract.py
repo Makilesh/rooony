@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sqlite3
 import sys
 import time
@@ -284,8 +285,19 @@ def client():
     return _client
 
 
+# A per-DAY quota 429 never clears inside a backoff window - retrying it just
+# burns ~90s and still fails. Per-minute rate limits do clear, so those we retry.
+_DAILY_QUOTA = ("PERDAY", "REQUESTSPERDAY", "GENERATEREQUESTSPERDAYPERPROJECTPERMODEL",
+                "FREE_TIER_REQUESTS", "FREE TIER")
+
+
 def _retryable(err: Exception) -> bool:
     m = f"{type(err).__name__} {err}".upper()
+    if "429" in m and any(t in m for t in _DAILY_QUOTA):
+        print("[gemini] daily quota exhausted - not retrying (it resets at "
+              "midnight Pacific; use a billed key, or `uv run stub_extract.py` "
+              "for the offline path)", file=sys.stderr)
+        return False
     return any(t in m for t in (
         "429", "RESOURCE_EXHAUSTED", "RATE", "QUOTA",
         "500", "503", "INTERNAL", "UNAVAILABLE", "DEADLINE", "TIMEOUT",
@@ -352,6 +364,21 @@ def build_batch(rows, known):
     return parts, meta
 
 
+USAGE = {"calls": 0, "prompt": 0, "output": 0, "thoughts": 0, "total": 0}
+
+
+def note_usage(resp):
+    """Accumulate real token counts so a run can be costed honestly."""
+    u = getattr(resp, "usage_metadata", None)
+    if not u:
+        return
+    USAGE["calls"] += 1
+    USAGE["prompt"] += getattr(u, "prompt_token_count", 0) or 0
+    USAGE["output"] += getattr(u, "candidates_token_count", 0) or 0
+    USAGE["thoughts"] += getattr(u, "thoughts_token_count", 0) or 0
+    USAGE["total"] += getattr(u, "total_token_count", 0) or 0
+
+
 def extract_batch(rows, known):
     from google.genai import types
 
@@ -365,6 +392,7 @@ def extract_batch(rows, known):
     )
     resp = with_backoff(lambda: client().models.generate_content(
         model=MODEL, contents=parts, config=cfg))
+    note_usage(resp)
 
     items = resp.parsed
     if not items:  # schema mode should always populate .parsed; belt and braces
@@ -456,9 +484,18 @@ APP_ACTIVITY = {
 }
 
 
+# Matched on WORD BOUNDARIES, not as bare substrings. A plain `in` test made
+# "ssn" match "className", so every React/JSX screen was flagged sensitive and
+# --no-llm deleted the row *and unlinked the JPEG* - silent, unrecoverable data
+# loss on ordinary frontend work. Deleting is destructive; the matcher has to be
+# precise.
+_SENSITIVE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(h).replace(r"\ ", r"\s+") for h in SENSITIVE_HINTS) + r")\b",
+    re.IGNORECASE)
+
+
 def looks_sensitive(text, title):
-    hay = f"{text}\n{title}".lower()
-    return any(h in hay for h in SENSITIVE_HINTS)
+    return bool(_SENSITIVE_RE.search(f"{text}\n{title}"))
 
 
 def no_llm_pass(con, limit):
@@ -509,6 +546,7 @@ def one_pass(con, limit, dry_run=False):
     if not rows:
         return 0
     total_kept = total_del = 0
+    t0 = time.time()
 
     for start in range(0, len(rows), BATCH_SIZE):
         batch = rows[start:start + BATCH_SIZE]
@@ -537,6 +575,11 @@ def one_pass(con, limit, dry_run=False):
                 [b["id"] for b in batch]).fetchall():
             print(f"     {r['task_thread']:<28} {r['summary'][:80]}")
 
+    if USAGE["calls"]:
+        print(f"[usage] {USAGE['calls']} {MODEL} calls, "
+              f"{USAGE['prompt']} prompt + {USAGE['output']} output "
+              f"(+{USAGE['thoughts']} thinking) = {USAGE['total']} tokens "
+              f"in {time.time() - t0:.1f}s wall")
     return total_kept + total_del
 
 

@@ -10,3 +10,4 @@ frames/
 *.db-wal
 *.db-shm
 daemon.log
+.DS_Store

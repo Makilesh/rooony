@@ -7,7 +7,7 @@ screencapture/   JPEGs of your screen every N seconds        (teammate 1)
 indexer.py       JPEGs  -> frames rows
 extract.py       frames -> OCR + Gemini -> extractions
 sessionize.py    extractions -> sessions / threads / entities
-embed.py         sessions|frames -> gemini-embedding-001 -> vector index
+embed.py         sessions|frames -> BGE-small-en-v1.5 (local) -> vector index
 memory.py        recall_context / what_was_i_doing / todays_receipt
 src/             MCP server exposing all of the above           (teammate 3)
 ```
@@ -24,12 +24,14 @@ uv pip install -r requirements.txt
 ```
 
 `ocrmac` (Apple Vision) and `pyobjc` are macOS-only; the requirements file
-marks them so, everything else runs anywhere.
+marks them so, everything else runs anywhere. `sentence-transformers` pulls in
+torch — the first `embed.py` run downloads bge-small-en-v1.5 once and caches it.
 
 ## Env
 
 ```bash
 export GEMINI_API_KEY=...          # extract, session summaries, query parsing
+                                   # NOT used for embeddings - those are local
 export VECTOR_BACKEND=sqlite       # sqlite (default) | actian
 # optional
 export MEM_DIR=~/mem               # MEM_DB and MEM_FRAMES derive from it
@@ -54,7 +56,7 @@ uv run indexer.py                  # captured JPEGs -> frames rows (extracted=0)
 uv run extract.py                  # OCR + Gemini -> extractions, extracted=1
 uv run extract.py --no-llm         #   ...or OCR only, zero Gemini calls
 uv run sessionize.py --flush       # frames -> sessions / threads / entities
-uv run embed.py                    # gemini-embedding-001 -> vectorstore
+uv run embed.py                    # bge-small-en-v1.5 (local) -> vectorstore
 uv run memory.py doing 30
 uv run memory.py receipt
 
@@ -122,7 +124,7 @@ existing collection's vector size cannot be altered in place).
 {
   "session_id": 25,
   "timestamp": "2026-09-06T12:15:00",
-  "embedding": ["…768 floats…"],
+  "embedding": ["…384 floats…"],
   "application": "VS Code",
   "text": "roony group chat",
   "source": "screen_image"
@@ -168,12 +170,24 @@ checks) and never hold a write transaction open across an API call.
 
 ## One model, one dimension
 
-`embed.py` owns `EMBED_MODEL` and `EMBED_DIM` (gemini-embedding-001, 768).
+`embed.py` owns `EMBED_MODEL` and `EMBED_DIM` (`BAAI/bge-small-en-v1.5`, 384).
 `src/config.py` imports them rather than declaring its own. If the query side
 and the write side ever disagree on model or dims, cosine between a query and a
 stored vector is meaningless and search silently returns nonsense — so there is
 deliberately only one definition. We never embed images: screenshots become
-text via OCR (or Gemini vision when OCR is empty) and the text is embedded.
+text via ocrmac and the text is embedded.
+
+The model runs **locally** via sentence-transformers — no API key, no network
+after the first download (~130 MB, cached in `~/.cache/huggingface`). Vectors
+are L2-normalised at encode time, so cosine is a plain dot product everywhere.
+
+bge is trained asymmetrically: a **query** is prefixed with `Represent this
+sentence for searching relevant passages: `, a stored **passage** is not.
+`embed_query()` applies the prefix, `embed_texts(..., TASK_DOCUMENT)` does not.
+Prefixing both sides (or neither) is what makes every cosine collapse to a
+constant, which is the failure mode that looks like "search returns nonsense".
+Note bge's absolute cosine floor is high — ~0.4 between unrelated English
+sentences — so judge hits by the *gap*, not the raw number.
 
 ## Files
 
@@ -185,7 +199,7 @@ text via OCR (or Gemini vision when OCR is empty) and the text is embedded.
 | `extract.py` | OCR (ocrmac) → Gemini batch of 8 with `response_schema`; deletes sensitive frames |
 | `sessionize.py` | contiguous frames → sessions, threads, entities; absorbs short blips as `interruptions` |
 | `vectorstore.py` | `upsert` / `search`; SQLite cosine default, Actian adapter |
-| `embed.py` | `gemini-embedding-001` @ 768d; vector failures log and continue |
+| `embed.py` | `BAAI/bge-small-en-v1.5` @ 384d, local; vector failures log and continue |
 | `memory.py` | `recall_context` / `what_was_i_doing` / `todays_receipt` |
 | `src/mcp_server.py` | the MCP server; 6 tools |
 | `src/vectorstore.py` | the real Actian SDK calls |

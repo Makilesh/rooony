@@ -1,5 +1,6 @@
 # extraction + embedding layer
 google-genai>=1.0
+sentence-transformers>=3.0
 ocrmac>=1.0 ; sys_platform == "darwin"
 pillow>=10.0
 numpy>=1.26
