@@ -67,6 +67,42 @@ Several frame records may share a `session_id`; `vectorstore.search()` collapses
 them to the best hit per session, so `memory.py` is identical either way.
 `--out records.jsonl` dumps them without indexing.
 
+## Integrating with `screencapture/`
+
+The capture side owns `frames` and inserts rows with `extracted=0`. This side
+only ever **reads** `frames` and flips that one flag — it never adds, renames or
+rewrites a column there, so the capture writer can't be broken by a migration
+on this side. Everything else lives in its own tables.
+
+Point both halves at the same database (`MEM_DB`, default `~/mem/mem.db`), then:
+
+```bash
+uv run doctor.py            # checks the seam end to end; exit 1 if anything is broken
+uv run doctor.py --live     # also spends ~2 API calls to prove the keys work
+```
+
+`extract.py` resolves the capture table's columns at runtime, so a rename on
+their side does not break the merge. It already accepts:
+
+| we need | names accepted |
+| --- | --- |
+| id | `id`, `frame_id`, `rowid` |
+| ts | `ts`, `timestamp`, `captured_at`, `capture_time`, `time`, `epoch` |
+| app | `app`, `app_name`, `application`, `process` |
+| window_title | `window_title`, `title`, `window`, `window_name` |
+| image_path | `image_path`, `path`, `img_path`, `file_path`, `image`, `screenshot` |
+| extracted | `extracted`, `processed`, `is_extracted`, `done` |
+
+Anything else: add it to `FRAME_COLUMNS` in `extract.py`. Also tolerated —
+`ts` as int, float, digit-string, milliseconds or ISO 8601 (`to_epoch`), and
+`image_path` absolute, relative to `MEM_DIR`, or a bare filename
+(`resolve_image`). If `frames` has **no** `extracted` column at all, a frame
+counts as done once it has a row in `extractions`, so the pass stays idempotent
+either way.
+
+Both processes write to the same SQLite file, so keep WAL on (`doctor.py`
+checks) and never hold a write transaction open across an API call.
+
 ## Files
 
 | file | does |
@@ -77,6 +113,7 @@ them to the best hit per session, so `memory.py` is identical either way.
 | `vectorstore.py` | `upsert` / `search`; all Actian code behind one TODO block, SQLite cosine default |
 | `embed.py` | `gemini-embedding-001` @ 768d; vector failures log and continue |
 | `memory.py` | `recall_context` / `what_was_i_doing` / `todays_receipt` |
+| `doctor.py` | verifies the capture seam, deps, keys, dims, pipeline state |
 | `stub_extract.py` | dev only: fills `extractions` with no API calls; delete when done |
 
 Tables: `frames` (capture-owned), `extractions`, `sessions`, `threads`,

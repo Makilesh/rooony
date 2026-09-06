@@ -88,6 +88,74 @@ Rules:
 """
 
 
+# --- the capture seam -----------------------------------------------------
+# `frames` is written by the capture side (screencapture/). We only ever read it
+# and flip its extracted flag. Column names are resolved at runtime so a rename
+# on their side doesn't break the merge.
+FRAME_COLUMNS = {
+    "id":           ["id", "frame_id", "rowid"],
+    "ts":           ["ts", "timestamp", "captured_at", "capture_time", "time", "epoch"],
+    "app":          ["app", "app_name", "application", "process"],
+    "window_title": ["window_title", "title", "window", "window_name"],
+    "image_path":   ["image_path", "path", "img_path", "file_path", "image", "screenshot"],
+    "extracted":    ["extracted", "processed", "is_extracted", "done"],
+}
+_schema = None
+
+
+def frames_schema(con):
+    """Map our names onto the capture table's actual columns. Cached."""
+    global _schema
+    if _schema is not None:
+        return _schema
+    cols = [r[1] for r in con.execute("PRAGMA table_info(frames)")]
+    if not cols:
+        sys.exit(f"no `frames` table in {DB_PATH} - is the capture side pointed here?")
+    lower = {c.lower(): c for c in cols}
+    out = {}
+    for want, candidates in FRAME_COLUMNS.items():
+        out[want] = next((lower[c] for c in candidates if c in lower), None)
+    missing = [k for k in ("ts", "image_path") if not out[k]]
+    if missing:
+        sys.exit(f"`frames` has no column for {missing}; saw {cols}. "
+                 "Add it to FRAME_COLUMNS in extract.py.")
+    out["id"] = out["id"] or "rowid"
+    renamed = {k: v for k, v in out.items() if v and v != k}
+    if renamed:
+        print(f"[schema] frames columns mapped: {renamed}", file=sys.stderr)
+    if not out["extracted"]:
+        print("[schema] frames has no `extracted` column - using the extractions "
+              "table itself as the processed marker", file=sys.stderr)
+    _schema = out
+    return out
+
+
+def to_epoch(v):
+    """Capture may store ts as int, float, digit-string or ISO 8601."""
+    if isinstance(v, (int, float)):
+        return int(v)
+    s = str(v).strip()
+    if s.replace(".", "", 1).isdigit():
+        n = float(s)
+        return int(n / 1000) if n > 1e11 else int(n)   # tolerate milliseconds
+    from datetime import datetime
+    return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+
+
+def resolve_image(path):
+    """Absolute, relative-to-MEM_DIR, or bare filename in the frames dir."""
+    if not path:
+        return ""
+    p = Path(path).expanduser()
+    if p.exists():
+        return str(p)
+    for base in (MEM_DIR, MEM_DIR / "frames", DB_PATH.parent, DB_PATH.parent / "frames"):
+        q = base / p.name
+        if q.exists():
+            return str(q)
+    return str(p)
+
+
 # --- db -------------------------------------------------------------------
 def connect():
     con = sqlite3.connect(DB_PATH, timeout=30)
@@ -127,10 +195,37 @@ def ensure_schema(con):
 
 
 def pending_frames(con, limit):
-    return con.execute(
-        "SELECT id, ts, app, window_title, image_path FROM frames "
-        "WHERE extracted = 0 ORDER BY ts LIMIT ?", (limit,)
-    ).fetchall()
+    s = frames_schema(con)
+    cols = (f"f.{s['id']} AS id, f.{s['ts']} AS ts, "
+            f"{('f.' + s['app']) if s['app'] else 'NULL'} AS app, "
+            f"{('f.' + s['window_title']) if s['window_title'] else 'NULL'} AS window_title, "
+            f"f.{s['image_path']} AS image_path")
+    if s["extracted"]:
+        sql = (f"SELECT {cols} FROM frames f WHERE f.{s['extracted']} = 0 "
+               f"ORDER BY f.{s['ts']} LIMIT ?")
+    else:  # no flag on their table: a frame is done once it has an extraction
+        sql = (f"SELECT {cols} FROM frames f WHERE NOT EXISTS "
+               f"(SELECT 1 FROM extractions e WHERE e.frame_id = f.{s['id']}) "
+               f"ORDER BY f.{s['ts']} LIMIT ?")
+    rows = []
+    for r in con.execute(sql, (limit,)).fetchall():
+        d = dict(r)
+        d["ts"] = to_epoch(d["ts"])
+        d["image_path"] = resolve_image(d["image_path"])
+        rows.append(d)
+    return rows
+
+
+def mark_extracted(con, frame_id):
+    s = frames_schema(con)
+    if s["extracted"]:
+        con.execute(f"UPDATE frames SET {s['extracted']} = 1 WHERE {s['id']} = ?",
+                    (frame_id,))
+
+
+def delete_frame(con, frame_id):
+    s = frames_schema(con)
+    con.execute(f"DELETE FROM frames WHERE {s['id']} = ?", (frame_id,))
 
 
 def recent_slugs(con, n=KNOWN_SLUGS):
@@ -315,7 +410,7 @@ def write_batch(con, rows, items, meta):
 
         if it.sensitive:
             con.execute("DELETE FROM extractions WHERE frame_id = ?", (row["id"],))
-            con.execute("DELETE FROM frames WHERE id = ?", (row["id"],))
+            delete_frame(con, row["id"])
             p = Path(row["image_path"] or "")
             if p.exists():
                 try:
@@ -337,7 +432,7 @@ def write_batch(con, rows, items, meta):
               json.dumps([e.strip() for e in it.entities if e and e.strip()]),
               it.resume_hint.strip(), it.activity_type, meta[i].get("ocr_text", ""),
               meta[i]["ocr_chars"], meta[i]["used_vision"], now))
-        con.execute("UPDATE frames SET extracted = 1 WHERE id = ?", (row["id"],))
+        mark_extracted(con, row["id"])
         kept += 1
 
     con.commit()
@@ -380,7 +475,7 @@ def no_llm_pass(con, limit):
         text = ocr_image(r["image_path"])
         if looks_sensitive(text, r["window_title"] or ""):
             con.execute("DELETE FROM extractions WHERE frame_id = ?", (r["id"],))
-            con.execute("DELETE FROM frames WHERE id = ?", (r["id"],))
+            delete_frame(con, r["id"])
             p = Path(r["image_path"] or "")
             if p.exists():
                 try:
@@ -401,7 +496,7 @@ def no_llm_pass(con, limit):
               (r["window_title"] or app), slugify(app), "[]", "",
               APP_ACTIVITY.get(app.lower(), "admin"), text[:MAX_OCR_CHARS],
               len(text), now))
-        con.execute("UPDATE frames SET extracted = 1 WHERE id = ?", (r["id"],))
+        mark_extracted(con, r["id"])
         kept += 1
     con.commit()
     print(f"[ocr-only] {kept} frames stored, {dropped} sensitive dropped, no API calls")
@@ -463,7 +558,9 @@ def main():
 
     if args.reset:
         con.execute("DELETE FROM extractions")
-        con.execute("UPDATE frames SET extracted = 0")
+        sch = frames_schema(con)
+        if sch["extracted"]:
+            con.execute(f"UPDATE frames SET {sch['extracted']} = 0")
         con.commit()
         print("reset: all frames pending again")
         return
@@ -473,7 +570,7 @@ def main():
 
     if not args.watch:
         n = passer()
-        left = con.execute("SELECT COUNT(*) FROM frames WHERE extracted=0").fetchone()[0]
+        left = len(pending_frames(con, 10 ** 9))
         print(f"done: {n} frames handled, {left} still pending")
         return
 
