@@ -224,9 +224,8 @@ def run(level, limit, force, emit, out_path):
     con = connect()
     recs = (session_rows if level == "session" else frame_rows)(con, limit, force)
     if not recs:
-        has_sessions = con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        print(f"nothing new to embed at level={level}" if has_sessions else
-              f"nothing to embed at level={level} - run sessionize.py first")
+        print(f"nothing to embed at level={level} "
+              "(run sessionize.py first, or pass --force)")
         return []
 
     vecs = embed_texts([r["text"] for r in recs], TASK_DOCUMENT)

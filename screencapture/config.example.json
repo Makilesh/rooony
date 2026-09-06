@@ -1,7 +1,0 @@
-{
-  "interval_seconds": 60,
-  "output_dir": "~/mem/frames",
-  "capture_app_name": true,
-  "max_files": null,
-  "max_age_days": null
-}

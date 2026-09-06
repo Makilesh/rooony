@@ -28,31 +28,13 @@ export ACTIAN_VECTOR_URL=... ACTIAN_VECTOR_API_KEY=... ACTIAN_VECTOR_DB=...
 
 ## Pipeline
 
-```
-screencapture/  --JPEGs-->  indexer.py  --rows-->  extract.py  --OCR+Gemini-->
-extractions  -->  sessionize.py  -->  sessions/threads/entities  -->
-embed.py  -->  vectors  -->  memory.py   (the API the MCP side imports)
-```
-
-Everything at once:
-
 ```bash
-uv run run_all.py                  # capture + indexer + extractor + roller
-uv run run_all.py --no-capture     # the daemon is already running under launchd
-uv run run_all.py --no-llm         # OCR only, zero Gemini calls
-```
-
-Or one stage at a time:
-
-```bash
-uv run indexer.py                  # captured JPEGs -> frames rows (extracted=0)
+uv run seed.py                     # 30 fabricated frames + JPEGs (~2h of work)
 uv run extract.py                  # OCR + Gemini -> extractions, extracted=1
 uv run extract.py --no-llm         #   ...or OCR only, zero Gemini calls
 uv run sessionize.py --flush       # frames -> sessions / threads / entities
 uv run embed.py                    # gemini-embedding-001 -> vectorstore
 uv run memory.py recall "cors bug this morning"
-
-uv run seed.py                     # no capture yet? 30 fabricated frames + JPEGs
 ```
 
 Every stage is independently runnable and idempotent. Re-running a stage does
@@ -85,28 +67,12 @@ Several frame records may share a `session_id`; `vectorstore.search()` collapses
 them to the best hit per session, so `memory.py` is identical either way.
 `--out records.jsonl` dumps them without indexing.
 
-## How `screencapture/` connects
+## Integrating with `screencapture/`
 
-The capture daemon writes **files only** — no database:
-
-```
-~/mem/frames/{unix_ts}_{App-Name}.jpg
-```
-
-`indexer.py` is the bridge. It scans that directory and inserts one `frames`
-row per new JPEG at `extracted=0`, parsing the timestamp and app name out of the
-filename, computing a dhash, and counting consecutive near-duplicates into
-`dup_count`. It is idempotent (`image_path` is unique) and `--prune` drops rows
-whose JPEG the daemon's retention has since deleted, keeping any that were
-already extracted.
-
-`window_title` is always NULL: the capture side detects the frontmost app but
-not the window title. Summaries lean on the OCR text instead, which is why the
-OCR check in `doctor.py` matters.
-
-After indexing, this side only ever **reads** `frames` and flips `extracted` —
-it never adds, renames or rewrites a column there, so nothing here can break the
-capture writer.
+The capture side owns `frames` and inserts rows with `extracted=0`. This side
+only ever **reads** `frames` and flips that one flag — it never adds, renames or
+rewrites a column there, so the capture writer can't be broken by a migration
+on this side. Everything else lives in its own tables.
 
 Point both halves at the same database (`MEM_DB`, default `~/mem/mem.db`), then:
 
@@ -147,9 +113,6 @@ checks) and never hold a write transaction open across an API call.
 | `vectorstore.py` | `upsert` / `search`; all Actian code behind one TODO block, SQLite cosine default |
 | `embed.py` | `gemini-embedding-001` @ 768d; vector failures log and continue |
 | `memory.py` | `recall_context` / `what_was_i_doing` / `todays_receipt` |
-| `screencapture/` | teammate 1: the capture daemon (JPEGs only, no DB) |
-| `indexer.py` | captured JPEGs → `frames` rows; dhash, dup_count, `--prune` |
-| `run_all.py` | capture + indexer + extractor + periodic sessionize/embed, one ctrl-c |
 | `doctor.py` | verifies the capture seam, deps, keys, dims, pipeline state |
 | `stub_extract.py` | dev only: fills `extractions` with no API calls; delete when done |
 

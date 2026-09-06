@@ -74,42 +74,6 @@ def main():
         HAVE_OCR = False
         warn("ocrmac unavailable", f"macOS only; every frame would go to Gemini vision [{e}]")
 
-    section("capture side (screencapture/)")
-    cap_cfg = Path(__file__).resolve().parent / "screencapture" / "config.json"
-    cap_src = Path(__file__).resolve().parent / "screencapture" / "src" / "main.py"
-    if cap_src.exists():
-        ok("screencapture/src/main.py present")
-    else:
-        warn("screencapture/ not in this checkout", "merge the capture branch in")
-    import indexer
-    d = indexer.frames_dir()
-    if cap_cfg.exists():
-        try:
-            c = json.loads(cap_cfg.read_text())
-            ok("capture config read", f"interval={c.get('interval_seconds')}s "
-                                     f"output_dir={c.get('output_dir')}")
-        except Exception as e:
-            warn(f"screencapture/config.json unreadable: {e}")
-    else:
-        warn("no screencapture/config.json yet",
-             "the daemon writes it on first run; defaults to ~/mem/frames")
-    if d.is_dir():
-        imgs = [p for p in d.iterdir()
-                if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png")]
-        ok(f"capture dir {d}", f"{len(imgs)} images")
-        if imgs:
-            newest = max(imgs, key=lambda p: p.stat().st_mtime)
-            age = (time.time() - newest.stat().st_mtime) / 60
-            (ok if age < 10 else warn)(f"newest capture {age:.0f} min old", newest.name)
-            if not indexer.NAME_RE.match(newest.name):
-                warn(f"filename {newest.name!r} is not {{epoch}}_{{App}}.jpg",
-                     "indexer falls back to file mtime and no app name")
-        else:
-            warn("capture dir is empty", "start screencapture/src/main.py")
-    else:
-        bad(f"no capture directory at {d}",
-            "start the daemon, or set MEM_FRAMES / screencapture output_dir")
-
     section("database")
     if not DB_PATH.exists():
         bad(f"no database at {DB_PATH}",
@@ -148,26 +112,8 @@ def main():
 
     total = con.execute("SELECT COUNT(*) FROM frames").fetchone()[0]
     ok(f"{total} rows in frames")
-    try:
-        n_imgs = len([p for p in indexer.frames_dir().iterdir()
-                      if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png")])
-        if n_imgs > total:
-            bad(f"{n_imgs - total} captured images are not in `frames`",
-                "run `uv run indexer.py` (or `--watch 5` alongside the daemon) - "
-                "the capture side writes JPEGs only, indexer.py makes the rows")
-        elif n_imgs:
-            ok("every captured image is indexed")
-    except Exception:
-        pass
     if total == 0:
-        warn("frames is empty", "run `uv run indexer.py`, or `uv run seed.py`")
-    n_titles = con.execute(
-        f"SELECT COUNT(*) FROM frames WHERE {sch['window_title']} IS NOT NULL"
-    ).fetchone()[0] if sch["window_title"] else 0
-    if total and not n_titles:
-        warn("window_title is NULL on every row",
-             "capture detects the app but not the window title; summaries lean "
-             "on OCR text instead")
+        warn("frames is empty", "start the capture loop, or run `uv run seed.py`")
 
     row = con.execute(f"SELECT * FROM frames ORDER BY {sch['ts']} DESC LIMIT 1").fetchone()
     if row:
