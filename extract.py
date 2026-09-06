@@ -559,6 +559,14 @@ def no_llm_pass(con, limit):
 
     Enough for the embedding layer (text + application + timestamp); the
     Gemini fields stay empty until extract.py runs without --no-llm.
+
+    Commits per frame, deliberately. The first INSERT opens a write
+    transaction, and a single commit at the end would hold it across every
+    remaining ocr_image() call - ~600ms each on real screenshots. Clearing a
+    93-frame backlog held the write lock for ~56s, past indexer.py's 30s
+    timeout, so the indexer died with "database is locked" and run_all.py tore
+    the whole pipeline down with it. Same rule as the Gemini path: never hold a
+    write transaction open across slow work.
     """
     rows = pending_frames(con, limit)
     if not rows:
@@ -576,6 +584,7 @@ def no_llm_pass(con, limit):
                 except OSError:
                     pass
             dropped += 1
+            con.commit()
             print(f"  [sensitive] dropped frame {r['id']} ({r['app']})")
             continue
         app = (r["app"] or "unknown").strip()
@@ -591,7 +600,7 @@ def no_llm_pass(con, limit):
               len(text), now))
         mark_extracted(con, r["id"])
         kept += 1
-    con.commit()
+        con.commit()
     print(f"[ocr-only] {kept} frames stored, {dropped} sensitive dropped, no API calls")
     return kept + dropped
 
