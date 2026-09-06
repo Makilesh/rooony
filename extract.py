@@ -468,12 +468,82 @@ def write_batch(con, rows, items, meta):
 
 
 # --- ocr-only pass (no Gemini at all) -------------------------------------
-SENSITIVE_HINTS = (
-    "account balance", "available balance", "routing number", "account number",
-    "credit card", "chase online", "bank of america", "wells fargo", "paypal",
-    "password", "passphrase", "api key", "secret key", "private key",
-    "1password", "keychain", "two-factor", "verification code", "ssn",
+# Deleting is irreversible and the --no-llm path has no judgement, only keywords,
+# so the bar for deleting is higher here than in the Gemini path.
+#
+# Measured on 382 real captures: matching any of these words on its own deleted
+# 107 frames (28%), including 23/23 VS Code frames and 71/131 Terminal frames.
+# Only 19 held anything resembling a credential; the rest merely *mentioned* the
+# words - a file tree containing `api.env`, a README, a terminal showing this
+# project's own brief. So the words are split in two:
+#
+#   STRONG  phrases that essentially only occur on a genuinely sensitive screen
+#   WEAK    words that occur constantly in ordinary dev work, and therefore only
+#           count when an actual secret-shaped value sits next to them
+SENSITIVE_STRONG = (
+    "account balance", "available balance", "routing number",
+    "chase online", "bank of america", "wells fargo",
+    "1password", "keychain access", "last pass", "lastpass",
+    "verification code", "one-time passcode", "social security number",
 )
+
+SENSITIVE_WEAK = (
+    "password", "passphrase", "api key", "secret key", "private key",
+    "access token", "credit card", "account number", "two-factor", "ssn",
+    "paypal", "keychain",
+)
+
+# a credential-shaped value: `key = <16+ non-space chars>`, a long opaque token,
+# a PEM block, or a card/SSN number
+# Unambiguous on their own - these shapes do not occur in prose.
+SECRET_SELF_EVIDENT = (
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    r"\b(?:sk|pk|ghp|gho|xox[baprs])[-_][A-Za-z0-9]{16,}\b",
+    r"\bAIza[A-Za-z0-9_\-]{30,}\b",
+    r"\b\d{3}-\d{2}-\d{4}\b",                                   # SSN
+    r"\b(?:\d[ -]?){15,16}\b",                                   # card number
+)
+
+# A generic `name = value` assignment. Ambiguous alone (a docs page shows these
+# too), so it only counts alongside one of the WEAK words.
+SECRET_ASSIGNMENT = (
+    r"(?:password|passwd|pwd|secret|token|api[_\- ]?key|apikey|access[_\- ]?key)"
+    r"\s*[:=]\s*[\"\']?[^\s\"\']{12,}",
+)
+
+SECRET_SHAPES = SECRET_SELF_EVIDENT + SECRET_ASSIGNMENT
+
+# Kept as the union so doctor.py and anything else importing it still works.
+SENSITIVE_HINTS = SENSITIVE_STRONG + SENSITIVE_WEAK
+
+# "api key" must also match "API_KEY" and "api-key": separators vary.
+_word = lambda hs: re.compile(
+    r"\b(?:" + "|".join(re.escape(h).replace(r"\ ", r"[\s_-]+") for h in hs) + r")\b",
+    re.IGNORECASE)
+
+# Matched on WORD BOUNDARIES, not as bare substrings. A plain `in` test made
+# "ssn" match "className", so every React/JSX screen was flagged sensitive and
+# --no-llm deleted the row *and unlinked the JPEG* - silent, unrecoverable data
+# loss on ordinary frontend work.
+_STRONG_RE = _word(SENSITIVE_STRONG)
+_WEAK_RE = _word(SENSITIVE_WEAK)
+_SENSITIVE_RE = _word(SENSITIVE_HINTS)          # any mention; used by doctor/tests
+_SECRET_SELF_RE = re.compile("|".join(SECRET_SELF_EVIDENT), re.IGNORECASE)
+_SECRET_RE = re.compile("|".join(SECRET_SHAPES), re.IGNORECASE)
+
+
+def looks_sensitive(text, title):
+    """True only when the screen is worth DELETING over.
+
+    A strong phrase is enough on its own. A weak word needs a secret-shaped
+    value on the same screen - otherwise every README that says "API key" and
+    every sidebar listing `api.env` would be destroyed.
+    """
+    hay = f"{text}\n{title}"
+    if _STRONG_RE.search(hay) or _SECRET_SELF_RE.search(hay):
+        return True
+    return bool(_WEAK_RE.search(hay) and _SECRET_RE.search(hay))
+
 
 APP_ACTIVITY = {
     "code": "coding", "visual studio code": "coding", "xcode": "coding",
@@ -482,20 +552,6 @@ APP_ACTIVITY = {
     "zoom": "comms", "notion": "admin", "linear": "admin", "figma": "admin",
     "preview": "reading", "books": "reading", "spotify": "media",
 }
-
-
-# Matched on WORD BOUNDARIES, not as bare substrings. A plain `in` test made
-# "ssn" match "className", so every React/JSX screen was flagged sensitive and
-# --no-llm deleted the row *and unlinked the JPEG* - silent, unrecoverable data
-# loss on ordinary frontend work. Deleting is destructive; the matcher has to be
-# precise.
-_SENSITIVE_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(h).replace(r"\ ", r"\s+") for h in SENSITIVE_HINTS) + r")\b",
-    re.IGNORECASE)
-
-
-def looks_sensitive(text, title):
-    return bool(_SENSITIVE_RE.search(f"{text}\n{title}"))
 
 
 def no_llm_pass(con, limit):

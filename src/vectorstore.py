@@ -58,14 +58,41 @@ def ensure_collection(size: int = None, recreate: bool = False):
     from actian_vectorai import VectorParams, Distance
 
     client = get_client()
+    size = size or config.EMBED_DIM
     if client.collections.exists(config.COLLECTION):
         if not recreate:
+            existing = _vector_size(client)
+            if existing is not None and existing != size:
+                raise RuntimeError(
+                    f"collection {config.COLLECTION!r} stores {existing}-dim vectors "
+                    f"but this build embeds at {size} ({config.EMBED_MODEL}). An "
+                    f"existing collection's vector size cannot be changed in place - "
+                    f"run `VECTOR_BACKEND=actian uv run embed.py --reset` to drop and "
+                    f"recreate it, then re-embed.")
             return
         client.collections.delete(config.COLLECTION)
     client.collections.create(
         config.COLLECTION,
-        vectors_config=VectorParams(size=size or config.EMBED_DIM, distance=Distance.Cosine),
+        vectors_config=VectorParams(size=size, distance=Distance.Cosine),
     )
+
+
+def _vector_size(client):
+    """The collection's configured vector size, or None if the SDK won't say.
+
+    A stale collection left at another model's dimensions is the failure that
+    makes every cosine come back 0.0 rather than erroring, so it is worth one
+    best-effort lookup. Shapes differ across SDK versions; None means "could
+    not tell", and we let the upsert speak for itself.
+    """
+    try:
+        info = client.collections.get_info(config.COLLECTION)
+        node = getattr(getattr(info, "config", None), "params", None)
+        vectors = getattr(node, "vectors", None)
+        size = getattr(vectors, "size", None)
+        return int(size) if size else None
+    except Exception:
+        return None
 
 
 def upsert_activity(point_id: str, record: dict):
