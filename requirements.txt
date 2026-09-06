@@ -1,0 +1,13 @@
+# extraction + embedding layer
+google-genai>=1.0
+ocrmac>=1.0 ; sys_platform == "darwin"
+pillow>=10.0
+numpy>=1.26
+pydantic>=2.0
+
+# capture daemon (screencapture/)
+pyobjc-framework-Cocoa ; sys_platform == "darwin"
+
+# MCP server (src/)
+mcp>=2.0.0
+actian-vectorai-client>=1.0.2

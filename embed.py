@@ -142,24 +142,36 @@ def session_for(con, ts):
     return r["id"] if r else None
 
 
-def already_indexed(record_id):
-    """False whenever the vector layer can't answer - we re-embed rather than die."""
-    try:
-        return vectorstore.backend().con.execute(
-            "SELECT 1 FROM vectors WHERE record_id=?", (record_id,)).fetchone() is not None
-    except Exception:
-        return False
+def ensure_log(con):
+    """What has been indexed is tracked in SQLite, not in the vector store.
+
+    Reaching into the backend's own tables only worked for the sqlite backend;
+    on Actian it raised, every record looked un-indexed, and each run re-embedded
+    everything. SQLite is the system of record, so the log lives here.
+    """
+    con.execute("""CREATE TABLE IF NOT EXISTS vector_log (
+                       record_id  TEXT PRIMARY KEY,
+                       session_id INTEGER,
+                       backend    TEXT,
+                       vector_id  TEXT,
+                       indexed_at INTEGER)""")
+    con.commit()
+
+
+def already_indexed(con, record_id):
+    return con.execute("SELECT 1 FROM vector_log WHERE record_id=? AND backend=?",
+                       (record_id, vectorstore.BACKEND)).fetchone() is not None
 
 
 def frame_rows(con, limit, force):
     rows = con.execute("""
         SELECT e.frame_id, e.ts, e.app, e.window_title, e.ocr_text, e.summary,
-               e.task_thread, e.entities
+               e.task_thread, e.entities, e.activity_type
         FROM extractions e ORDER BY e.ts LIMIT ?""", (limit,)).fetchall()
     out = []
     for r in rows:
         rid = f"frame:{r['frame_id']}"
-        if not force and already_indexed(rid):
+        if not force and already_indexed(con, rid):
             continue
         sid = session_for(con, r["ts"])
         if sid is None:
@@ -178,6 +190,7 @@ def frame_rows(con, limit, force):
             "source": SOURCE_FRAME,
             "_ts": r["ts"],
             "_thread": r["task_thread"],
+            "_activity": r["activity_type"],
         })
     return out
 
@@ -187,7 +200,7 @@ def session_rows(con, limit, force):
                        (limit,)).fetchall()
     out = []
     for r in rows:
-        if not force and already_indexed(f"session:{r['id']}"):
+        if not force and already_indexed(con, f"session:{r['id']}"):
             continue
         app = con.execute("SELECT app, COUNT(*) c FROM extractions WHERE ts BETWEEN ?"
                           " AND ? GROUP BY app ORDER BY c DESC LIMIT 1",
@@ -203,6 +216,7 @@ def session_rows(con, limit, force):
             "source": SOURCE_SESSION,
             "_ts": r["started_at"],
             "_thread": r["thread_slug"],
+            "_activity": None,
         })
     return out
 
@@ -222,10 +236,12 @@ def public(rec):
 # --- run ------------------------------------------------------------------
 def run(level, limit, force, emit, out_path):
     con = connect()
+    ensure_log(con)
     recs = (session_rows if level == "session" else frame_rows)(con, limit, force)
     if not recs:
-        print(f"nothing to embed at level={level} "
-              "(run sessionize.py first, or pass --force)")
+        has_sessions = con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        print(f"nothing new to embed at level={level}" if has_sessions else
+              f"nothing to embed at level={level} - run sessionize.py first")
         return []
 
     vecs = embed_texts([r["text"] for r in recs], TASK_DOCUMENT)
@@ -248,7 +264,7 @@ def run(level, limit, force, emit, out_path):
     # open write txn here while vectorstore commits, or they deadlock on the WAL
     # writer lock: collect the session updates and apply them after the upserts.
     ok = fail = 0
-    updates = []
+    updates, logged = [], []
     for r in recs:
         try:
             vid = vectorstore.upsert(r["session_id"], r["embedding"], {
@@ -258,16 +274,22 @@ def run(level, limit, force, emit, out_path):
                 "started_at": r["_ts"],
                 "timestamp": r["timestamp"],
                 "application": r["application"],
+                "activity": r["_activity"],
                 "source": r["source"],
                 "text": r["text"][:500],
             })
             updates.append((vid, r["session_id"]))
+            logged.append((r["record_id"], r["session_id"], vectorstore.BACKEND,
+                           vid, int(time.time())))
             ok += 1
         except Exception as e:
             # The vector layer is optional. SQLite is the system of record.
             fail += 1
             print(f"[vector] upsert failed for {r['record_id']}: "
                   f"{type(e).__name__}: {e}", file=sys.stderr)
+    if logged:
+        con.executemany("INSERT OR REPLACE INTO vector_log (record_id, session_id,"
+                        " backend, vector_id, indexed_at) VALUES (?,?,?,?,?)", logged)
     if updates:
         con.executemany(
             "UPDATE sessions SET vector_id=? WHERE id=? AND vector_id IS NULL"
@@ -290,11 +312,17 @@ def main():
     args = ap.parse_args()
 
     if args.reset:
-        vectorstore.backend().clear()
         con = connect()
+        ensure_log(con)
+        try:
+            vectorstore.clear(EMBED_DIM)
+        except Exception as e:
+            print(f"[vector] clear failed ({type(e).__name__}: {e}); "
+                  "clearing the local log anyway", file=sys.stderr)
+        con.execute("DELETE FROM vector_log WHERE backend=?", (vectorstore.BACKEND,))
         con.execute("UPDATE sessions SET vector_id=NULL")
         con.commit()
-        print("vector index cleared")
+        print(f"vector index cleared ({vectorstore.BACKEND})")
         return
     run(args.level, args.limit, args.force, args.emit, args.out)
 
