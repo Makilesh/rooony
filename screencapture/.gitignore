@@ -1,7 +1,9 @@
 venv/
 captures/
 frames/
+logs/
 *.log
 __pycache__/
 *.pyc
 .DS_Store
+config.json

@@ -88,6 +88,66 @@ app as a candidate), then check the list again.
 
 ---
 
+## CP5: run forever in the background (launchd)
+
+```bash
+cd screencapture
+./install.sh
+```
+
+This generates `~/Library/LaunchAgents/com.thryambak.screenshotdaemon.plist`
+from `launchd/com.screenshotdaemon.plist.template` (substituting in this
+checkout's absolute `venv/bin/python3` and `src/main.py` paths), then loads
+it with `launchctl`. `RunAtLoad` + `KeepAlive` mean it starts at login and
+launchd restarts it if it crashes. launchd's own stdout/stderr are written
+to `screencapture/logs/launchd-{stdout,stderr}.log`; the daemon's own
+structured log is still `screencapture/daemon.log` (see CP4).
+
+### Grant Screen Recording permission to the daemon's python (separate from Terminal!)
+
+This is the step people miss. The permission you granted earlier was for
+**Terminal.app**. Under launchd, the process launching is the **venv's
+python interpreter itself** — a completely different TCC identity — and it
+needs its *own* grant, or captures will silently be blank.
+
+1. Find the real interpreter binary (the venv's `python3` is a symlink):
+   ```bash
+   readlink -f screencapture/venv/bin/python3
+   ```
+2. Open **System Settings → Privacy & Security → Screen Recording**.
+3. Click **+**, navigate to and select that resolved path (e.g. something
+   like `/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12`).
+4. Run `./uninstall.sh` then `./install.sh` again so launchd restarts the
+   process fresh under the new permission (a running process won't pick up
+   a permission granted after it started).
+5. Verify:
+   ```bash
+   launchctl list | grep com.thryambak.screenshotdaemon   # should show a PID
+   ls -la ~/mem/frames                                     # new files appearing
+   open ~/mem/frames/<latest>.jpg                          # should be non-blank
+   ```
+
+### Uninstall
+
+```bash
+./uninstall.sh
+```
+Unloads the LaunchAgent and removes the plist. No more captures should
+happen after this (`launchctl list | grep com.thryambak.screenshotdaemon`
+should print nothing).
+
+## Known issues
+
+- **Active-app detection sometimes reports "Terminal" regardless of the true
+  frontmost app.** During CP2/CP4 testing, `NSWorkspace.frontmostApplication()`
+  (used by `src/active_app.py`) consistently returned `Terminal` even after
+  manually switching focus to Chrome/VS Code and holding it there. A
+  cross-check against an independent AppleScript/`System Events` query was
+  set up but not completed. This does not block CP0–CP4 (capture itself
+  works; only the app-name tag may be wrong), but it means filenames may be
+  mislabeled with the wrong app name. Needs follow-up investigation before
+  relying on the app-name field for anything downstream.
+
 ## Project layout
 
 ```
